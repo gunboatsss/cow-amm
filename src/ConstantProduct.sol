@@ -2,20 +2,20 @@
 pragma solidity >=0.8.0 <0.9.0;
 
 import {IERC20} from "lib/composable-cow/lib/@openzeppelin/contracts/interfaces/IERC20.sol";
+import {Math} from "lib/composable-cow/lib/@openzeppelin/contracts/utils/math/Math.sol";
 import {ConditionalOrdersUtilsLib as Utils} from "lib/composable-cow/src/types/ConditionalOrdersUtilsLib.sol";
-import {BaseConditionalOrder, IConditionalOrderGenerator, IConditionalOrder} from "lib/composable-cow/src/BaseConditionalOrder.sol";
+import {IConditionalOrderGenerator, IConditionalOrder, IERC165} from "lib/composable-cow/src/BaseConditionalOrder.sol";
 import {GPv2Order} from "lib/composable-cow/lib/cowprotocol/src/contracts/libraries/GPv2Order.sol";
 import {IUniswapV2Pair} from "lib/uniswap-v2-core/contracts/interfaces/IUniswapV2Pair.sol";
 
-contract ConstantProduct is BaseConditionalOrder {
-    uint256 internal constant MAX_BPS = 10_000;
+import "forge-std/console.sol";
+
+contract ConstantProduct is IConditionalOrderGenerator {
+    uint32 public constant MAX_ORDER_DURATION = 5 * 60;
 
     struct Data {
-        IERC20 tokenA;
-        IERC20 tokenB;
-        address target;
         IUniswapV2Pair referencePair;
-        uint256 minTradeVolumeBps;
+        address receiver;
         bytes32 appData;
     }
 
@@ -28,72 +28,129 @@ contract ConstantProduct is BaseConditionalOrder {
         override
         returns (GPv2Order.Data memory order)
     {
-        ConstantProduct.Data memory data = abi.decode(staticInput, (Data));
-
-        (uint256 my0, uint256 my1) = (data.tokenA.balanceOf(owner), data.tokenB.balanceOf(owner));
-        uint256 myK = my0 * my1;
-
-        (uint256 reserve0, uint256 reserve1) = (0, 0);
-        if (data.referencePair.token0() == address(data.tokenA) && data.referencePair.token1() == address(data.tokenB))
+        // Note: we are not interested in the gas efficiency of this function
+        // because it is not supposed to be called by a call in the blockchain.
+        IERC20 token0;
+        IERC20 token1;
+        uint256 uniswapReserve0;
+        uint256 uniswapReserve1;
         {
-            (reserve0, reserve1,) = data.referencePair.getReserves();
-        } else if (
-            data.referencePair.token0() == address(data.tokenB) && data.referencePair.token1() == address(data.tokenA)
-        ) {
-            (reserve1, reserve0,) = data.referencePair.getReserves();
+            ConstantProduct.Data memory data = abi.decode(staticInput, (Data));
+
+            order = GPv2Order.Data(
+                IERC20(address(0)),
+                IERC20(address(0)),
+                data.receiver,
+                0,
+                0,
+                Utils.validToBucket(MAX_ORDER_DURATION),
+                data.appData,
+                0,
+                GPv2Order.KIND_SELL,
+                true,
+                GPv2Order.BALANCE_ERC20,
+                GPv2Order.BALANCE_ERC20
+            );
+
+            token0 = IERC20(data.referencePair.token0());
+            token1 = IERC20(data.referencePair.token1());
+            (uniswapReserve0, uniswapReserve1,) = data.referencePair.getReserves();
+        }
+        uint256 selfReserve0 = token0.balanceOf(owner);
+        uint256 selfReserve1 = token1.balanceOf(owner);
+
+        IERC20 sellToken;
+        IERC20 buyToken;
+        uint256 sellAmount;
+        uint256 buyAmount;
+        uint256 sellBalance;
+        // Note: sell amount rounds down,
+        if (uniswapReserve0 * selfReserve1 < uniswapReserve1 * selfReserve0) {
+            sellToken = token0;
+            sellBalance = selfReserve0;
+            buyToken = token1;
+            // Note: it isn't needed to use more sophisticated multiplication like Math.mulDiv because Uniswap reserves are uint112.
+            sellAmount = selfReserve0 / 2 - Math.ceilDiv((uniswapReserve0 * selfReserve1), (2 * uniswapReserve1));
+            buyAmount = (uniswapReserve1 * selfReserve0) / (2 * uniswapReserve0) - selfReserve1 / 2;
         } else {
-            revert("invalid pair");
+            sellToken = token1;
+            sellBalance = selfReserve1;
+            buyToken = token0;
+            sellAmount = selfReserve1 / 2 - Math.ceilDiv((uniswapReserve1 * selfReserve0), (2 * uniswapReserve0));
+            buyAmount = (uniswapReserve0 * selfReserve1) / (2 * uniswapReserve1) - selfReserve0 / 2;
         }
 
-        uint256 new1 = sqrt(myK * reserve1 / reserve0);
-        uint256 new0 = myK / new1;
-
-        order = GPv2Order.Data(
-            IERC20(address(0)),
-            IERC20(address(0)),
-            address(0),
-            0,
-            0,
-            Utils.validToBucket(3600),
-            data.appData,
-            0,
-            GPv2Order.KIND_SELL,
-            true,
-            GPv2Order.BALANCE_ERC20,
-            GPv2Order.BALANCE_ERC20
-        );
-
-        uint256 sellBalance = 0;
-        if (new1 > my1) {
-            sellBalance = my0;
-            order.sellToken = data.tokenA;
-            order.buyToken = data.tokenB;
-            order.sellAmount = my0 - new0 - 1;
-            order.buyAmount = new1 - my1 + 1;
-        } else {
-            sellBalance = my1;
-            order.sellToken = data.tokenB;
-            order.buyToken = data.tokenA;
-            order.sellAmount = my1 - new1 - 1;
-            order.buyAmount = new0 - my0 + 1;
-        }
-
-        if (order.sellAmount < sellBalance * data.minTradeVolumeBps / MAX_BPS) {
-            revert IConditionalOrder.OrderNotValid("min amount");
-        }
+        order.sellToken = sellToken;
+        order.buyToken = buyToken;
+        order.sellAmount = sellAmount;
+        order.buyAmount = buyAmount;
     }
 
-    // babylonian method (https://en.wikipedia.org/wiki/Methods_of_computing_square_roots#Babylonian_method)
-    function sqrt(uint256 y) internal pure returns (uint256 z) {
-        if (y > 3) {
-            z = y;
-            uint256 x = y / 2 + 1;
-            while (x < z) {
-                z = x;
-                x = (y / x + x) / 2;
-            }
-        } else if (y != 0) {
-            z = 1;
+    /**
+     * @inheritdoc IConditionalOrder
+     * @dev As an order generator, the `GPv2Order.Data` passed as a parameter is ignored / not validated.
+     */
+    function verify(
+        address owner,
+        address,
+        bytes32,
+        bytes32,
+        bytes32,
+        bytes calldata staticInput,
+        bytes calldata,
+        GPv2Order.Data calldata order
+    ) external view override {
+        // Wrapper function handles stack too deep issues because of unused input parameters.
+        _verify(owner, staticInput, order);
+    }
+
+    function _verify(address owner, bytes calldata staticInput, GPv2Order.Data calldata order) internal view {
+        ConstantProduct.Data memory data = abi.decode(staticInput, (Data));
+        IERC20 sellToken = IERC20(data.referencePair.token0());
+        IERC20 buyToken = IERC20(data.referencePair.token1());
+        uint256 sellReserve = sellToken.balanceOf(owner);
+        uint256 buyReserve = buyToken.balanceOf(owner);
+        //console.log("In contract: %s - %s ?", address(sellToken), address(buyToken));
+        if (order.sellToken != sellToken) {
+            require(order.sellToken == buyToken, "bad sell token");
+            (sellToken, buyToken) = (buyToken, sellToken);
+            (sellReserve, buyReserve) = (buyReserve, sellReserve);
         }
+        require(order.buyToken == buyToken, "bad buy token");
+
+        if (order.receiver != data.receiver) {
+            revert("receiver - ERROR");
+        }
+        // Motivation: avoid spamming the orderbook, force order refresh.
+        if (order.validTo > block.timestamp + MAX_ORDER_DURATION) {
+            revert("validTo - ERROR");
+        }
+        if (order.appData != data.appData) {
+            revert("appData - ERROR");
+        }
+        if (order.feeAmount != 0) {
+            revert("feeAmount - ERROR");
+        }
+        if (order.buyTokenBalance != GPv2Order.BALANCE_ERC20) {
+            revert("buyTokenBalance - ERROR");
+        }
+        if (order.sellTokenBalance != GPv2Order.BALANCE_ERC20) {
+            revert("sellTokenBalance - ERROR");
+        }
+        // y ≥ Y*x/(X-2x) => (X-2x) * y ≥ Y*x
+        if ((sellReserve - 2 * order.sellAmount) * order.buyAmount < buyReserve * order.sellAmount) {
+            revert("amm - ERROR");
+        }
+
+        // No checks on:
+        //bytes32 kind;
+        //bool partiallyFillable;
+    }
+
+    /**
+     * @inheritdoc IERC165
+     */
+    function supportsInterface(bytes4 interfaceId) external view virtual override returns (bool) {
+        return interfaceId == type(IConditionalOrderGenerator).interfaceId || interfaceId == type(IERC165).interfaceId;
     }
 }
