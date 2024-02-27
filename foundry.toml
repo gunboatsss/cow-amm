@@ -13,4 +13,7 @@ remappings = [
   "lib/composable-cow:@openzeppelin/contracts/=lib/composable-cow/lib/@openzeppelin/contracts/",
 ]
 
+# Access to files used in scripts
+fs_permissions = [{ access = "read", path = "./networks.json" }]
+
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

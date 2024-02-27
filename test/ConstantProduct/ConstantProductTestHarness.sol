@@ -68,14 +68,10 @@ abstract contract ConstantProductTestHarness is BaseComposableCoWTest {
             abi.decode(defaultData.priceOracleData, (UniswapV2PriceOracle.Data));
 
         vm.mockCall(
-            oracleData.referencePair.token0(),
-            abi.encodeWithSelector(IERC20.balanceOf.selector, owner),
-            abi.encode(amount0)
+            oracleData.referencePair.token0(), abi.encodeCall(IERC20.balanceOf.selector, (owner)), abi.encode(amount0)
         );
         vm.mockCall(
-            oracleData.referencePair.token1(),
-            abi.encodeWithSelector(IERC20.balanceOf.selector, owner),
-            abi.encode(amount1)
+            oracleData.referencePair.token1(), abi.encodeCall(IERC20.balanceOf.selector, (owner)), abi.encode(amount1)
         );
     }
 
@@ -83,7 +79,7 @@ abstract contract ConstantProductTestHarness is BaseComposableCoWTest {
         uint32 unusedTimestamp = 31337;
         vm.mockCall(
             address(DEFAULT_PAIR),
-            abi.encodeWithSelector(IUniswapV2Pair.getReserves.selector),
+            abi.encodeCall(IUniswapV2Pair.getReserves.selector),
             abi.encode(amount0, amount1, unusedTimestamp)
         );
     }
